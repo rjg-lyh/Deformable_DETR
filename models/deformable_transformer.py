@@ -21,11 +21,11 @@ from models.ops.modules import MSDeformAttn
 
 
 class DeformableTransformer(nn.Module):
-    def __init__(self, d_model=256, nhead=8,
-                 num_encoder_layers=6, num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
+    def __init__(self, d_model=64, nhead=8,
+                 num_encoder_layers=2, num_decoder_layers=2, dim_feedforward=1024, dropout=0.1,
                  activation="relu", return_intermediate_dec=False,
                  num_feature_levels=4, dec_n_points=4,  enc_n_points=4,
-                 two_stage=False, two_stage_num_proposals=300):
+                 two_stage=False, two_stage_num_proposals=10):
         super().__init__()
 
         self.d_model = d_model
@@ -133,22 +133,31 @@ class DeformableTransformer(nn.Module):
         spatial_shapes = []
         for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
             bs, c, h, w = src.shape
+            print(src.shape)
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
             src = src.flatten(2).transpose(1, 2)
+            print(src.shape)
             mask = mask.flatten(1)
             pos_embed = pos_embed.flatten(2).transpose(1, 2)
+            print(pos_embed.shape)
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+            print(lvl_pos_embed.shape)
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
         src_flatten = torch.cat(src_flatten, 1)
         mask_flatten = torch.cat(mask_flatten, 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
+        print('src_flatten: ', src_flatten.shape)
+        print('mask_flatten: ', mask_flatten.shape)
+        print('lvl_pos_embed_flatten: ', lvl_pos_embed_flatten.shape)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
-        valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
-
+        valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1) # [2 4 2]
+        print('spatial_shapes： ', spatial_shapes.shape)
+        print('level_start_index: ', level_start_index.shape)
+        print('valid_ratios: ', valid_ratios.shape)
         # encoder
         memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
 
@@ -170,11 +179,11 @@ class DeformableTransformer(nn.Module):
             pos_trans_out = self.pos_trans_norm(self.pos_trans(self.get_proposal_pos_embed(topk_coords_unact)))
             query_embed, tgt = torch.split(pos_trans_out, c, dim=2)
         else:
-            query_embed, tgt = torch.split(query_embed, c, dim=1)
-            query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1)
+            query_embed, tgt = torch.split(query_embed, c, dim=1)   #[10 64], [10 64]
+            query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1)   #[2 10 64]
             tgt = tgt.unsqueeze(0).expand(bs, -1, -1)
-            reference_points = self.reference_points(query_embed).sigmoid()
-            init_reference_out = reference_points
+            reference_points = self.reference_points(query_embed).sigmoid() #[2 10 2]
+            init_reference_out = reference_points # 初始化时，每一个query的参考中心
 
         # decoder
         hs, inter_references = self.decoder(tgt, reference_points, memory,
@@ -219,6 +228,7 @@ class DeformableTransformerEncoderLayer(nn.Module):
     def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None):
         # self attention
         src2 = self.self_attn(self.with_pos_embed(src, pos), reference_points, src, spatial_shapes, level_start_index, padding_mask)
+        #src2: [2, 15060, 64]
         src = src + self.dropout1(src2)
         src = self.norm1(src)
 
@@ -241,12 +251,13 @@ class DeformableTransformerEncoder(nn.Module):
 
             ref_y, ref_x = torch.meshgrid(torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
                                           torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device))
-            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_)
-            ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)
-            ref = torch.stack((ref_x, ref_y), -1)
+            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_) # 归一化,None语法用来保持维度的
+            ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)# 不然变为[2,],加了None就是[2,1]
+            ref = torch.stack((ref_x, ref_y), -1) # [2 2832 2]每张图上的归一化后的坐标
             reference_points_list.append(ref)
-        reference_points = torch.cat(reference_points_list, 1)
-        reference_points = reference_points[:, :, None] * valid_ratios[:, None]
+        reference_points = torch.cat(reference_points_list, 1)  # [2 15060 2]
+        reference_points = reference_points[:, :, None] * valid_ratios[:, None]# [2 15060 4 2]
+        print('reference_points：', reference_points.shape)
         return reference_points
 
     def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
@@ -254,7 +265,7 @@ class DeformableTransformerEncoder(nn.Module):
         reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         for _, layer in enumerate(self.layers):
             output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
-
+                        #[2 15060 64] ,[2 15060 64] ,[2 15060 4 2] ,[2 4 2] ,[4,] ,[2 15060]
         return output
 
 
@@ -324,7 +335,7 @@ class DeformableTransformerDecoder(nn.Module):
 
     def forward(self, tgt, reference_points, src, src_spatial_shapes, src_level_start_index, src_valid_ratios,
                 query_pos=None, src_padding_mask=None):
-        output = tgt
+        output = tgt #[2 10 64]
 
         intermediate = []
         intermediate_reference_points = []

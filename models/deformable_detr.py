@@ -128,15 +128,32 @@ class DeformableDETR(nn.Module):
         """
         if not isinstance(samples, NestedTensor):
             samples = nested_tensor_from_tensor_list(samples)
-        features, pos = self.backbone(samples)
+        features, pos = self.backbone(samples) #features: len=3, [2, 512, 96, 118]
 
         srcs = []
         masks = []
         for l, feat in enumerate(features):
             src, mask = feat.decompose()
-            srcs.append(self.input_proj[l](src))
+            print(src.shape)
+            src1 = self.input_proj[l](src)
+            print(src1.shape)
+            srcs.append(src1)
             masks.append(mask)
             assert mask is not None
+        '''
+        src1: 
+        torch.Size([2, 512, 96, 118])
+        torch.Size([2, 64, 96, 118])
+        src2: 
+        torch.Size([2, 1024, 48, 59])
+        torch.Size([2, 64, 48, 59])
+        src3: 
+        torch.Size([2, 2048, 24, 30])
+        torch.Size([2, 64, 24, 30])
+        src4: 
+        torch.Size([2, 2048, 12, 15])
+        torch.Size([2, 64, 12, 15])
+        '''
         if self.num_feature_levels > len(srcs):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
@@ -147,15 +164,19 @@ class DeformableDETR(nn.Module):
                 m = samples.mask
                 mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
                 pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
-                srcs.append(src)
+                srcs.append(src)  # [2 64 12 15]
                 masks.append(mask)
-                pos.append(pos_l)
+                pos.append(pos_l) # pos的shape和feature的相同
 
         query_embeds = None
         if not self.two_stage:
-            query_embeds = self.query_embed.weight
+            query_embeds = self.query_embed.weight # [10  128]
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, query_embeds)
-
+        # hs: [2 2 10 64]  
+        # init_reference: [2 10 2] 
+        # inter_references: [2 2 10 2]
+        # enc_outputs_class: None
+        # enc_outputs_coord_unact: None
         outputs_classes = []
         outputs_coords = []
         for lvl in range(hs.shape[0]):
@@ -177,7 +198,7 @@ class DeformableDETR(nn.Module):
         outputs_class = torch.stack(outputs_classes)
         outputs_coord = torch.stack(outputs_coords)
 
-        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]} # out['pred_boxes']：[2 10 4] (0~1)
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
 

@@ -12,6 +12,7 @@ Misc functions, including distributed helpers.
 
 Mostly copy-paste from torchvision references.
 """
+import copy
 import os
 import subprocess
 import time
@@ -302,7 +303,9 @@ def get_sha():
 
 
 def collate_fn(batch):
+    batch2 = copy.deepcopy(batch)
     batch = list(zip(*batch))
+    batch3 = copy.deepcopy(batch)
     batch[0] = nested_tensor_from_tensor_list(batch[0])
     return tuple(batch)
 
